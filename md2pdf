@@ -5,7 +5,7 @@
 # Autor: Donshu
 # Contacto: donshu.apps@gmail.com
 # GitHub: https://github.com/donshuapps-cloud
-# Versión: 2.0.0
+# Versión: 2.1.0 (Fixed argument parsing)
 # ============================================================
 set -euo pipefail
 # ============================================================
@@ -33,7 +33,7 @@ print_usage() {
     cat << EOF
 ╔══════════════════════════════════════════════════════════════╗
 ║                    md2pdf - Markdown to PDF                  ║
-║                    Versión 2.0.0 - Donshu Apps               ║
+║                    Versión 2.1.0 - Donshu Apps               ║
 ╚══════════════════════════════════════════════════════════════╝
 Uso: $(basename "$0") [OPCIONES] <archivo.md|directorio>
 Convierte archivos Markdown a PDF usando pandoc con engine XeLaTeX.
@@ -133,8 +133,8 @@ check_dependencies() {
         log_error "En macOS: brew install pandoc"
         missing=1
     fi
-    # Verificar engine LaTeX
-    if [[ -n "${ENGINE:-}" ]]; then
+    # Verificar engine LaTeX (solo si estamos en modo conversión, no para --help)
+    if [[ "${CHECK_LATEX:-true}" == true ]] && [[ -n "${ENGINE:-}" ]]; then
         case "$ENGINE" in
             xelatex|lualatex|pdflatex)
                 if ! command -v "$ENGINE" &> /dev/null; then
@@ -165,7 +165,6 @@ convert_md_to_pdf() {
     local output_dir="$2"
     local output_filename
     local temp_file=""
-    local temp_cleanup=true
     # Validar archivo de entrada
     if [[ ! -f "$input_file" ]]; then
         log_error "Archivo no encontrado: $input_file"
@@ -193,7 +192,6 @@ convert_md_to_pdf() {
         temp_file=$(mktemp)
         remove_bom "$input_file" "$temp_file"
         input_file="$temp_file"
-        temp_cleanup=true
     fi
     # Construir comando pandoc usando array para evitar problemas con eval
     local pandoc_args=(
@@ -246,26 +244,58 @@ convert_md_to_pdf() {
 process_batch() {
     local files=()
     local output_dir="$DEFAULT_OUTPUT_DIR"
-    # Parsear argumentos para batch mode
-    shift  # Saltar --batch
+    local positional_args=()
     while [[ $# -gt 0 ]]; do
         case $1 in
             -o|--output)
                 output_dir="$2"
                 shift 2
                 ;;
+            -f|--font)
+                FONT="$2"
+                shift 2
+                ;;
+            -e|--engine)
+                ENGINE="$2"
+                shift 2
+                ;;
+            -t|--template)
+                TEMPLATE="$2"
+                shift 2
+                ;;
+            -c|--css)
+                CSS="$2"
+                shift 2
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -q|--quiet)
+                QUIET=true
+                shift
+                ;;
+            --no-bom)
+                NO_BOM=true
+                shift
+                ;;
             *)
-                # Si es un directorio, encontrar todos los .md dentro
-                if [[ -d "$1" ]]; then
-                    while IFS= read -r -d '' file; do
-                        files+=("$file")
-                    done < <(find "$1" -name "*.md" -type f -print0)
-                else
-                    files+=("$1")
-                fi
+                positional_args+=("$1")
                 shift
                 ;;
         esac
+    done
+    # Procesar argumentos posicionales
+    for item in "${positional_args[@]}"; do
+        if [[ -d "$item" ]]; then
+            while IFS= read -r -d '' file; do
+                files+=("$file")
+            done < <(find "$item" -name "*.md" -type f -print0 2>/dev/null || true)
+        elif [[ -f "$item" ]]; then
+            files+=("$item")
+        else
+            log_warn "Ignorando: $item (no es archivo ni directorio válido)"
+        fi
     done
     TOTAL_FILES=${#files[@]}
     if [[ $TOTAL_FILES -eq 0 ]]; then
@@ -297,9 +327,7 @@ process_batch() {
 # PROCESAMIENTO INDIVIDUAL
 # ============================================================
 process_single() {
-    local input_file="$1"
-    shift
-    # Parsear opciones restantes (pueden incluir -o, -f, etc)
+    local input_file=""
     while [[ $# -gt 0 ]]; do
         case $1 in
             -o|--output)
@@ -335,10 +363,18 @@ process_single() {
                 shift
                 ;;
             *)
+                if [[ -z "$input_file" ]]; then
+                    input_file="$1"
+                fi
                 shift
                 ;;
         esac
     done
+    if [[ -z "$input_file" ]]; then
+        log_error "No se especificó archivo de entrada"
+        print_usage
+        exit 1
+    fi
     convert_md_to_pdf "$input_file" "$OUTPUT_DIR"
     return $?
 }
@@ -359,25 +395,39 @@ main() {
     # Sin argumentos: mostrar ayuda
     if [[ $# -eq 0 ]]; then
         print_usage
-        exit 1
+        exit 0
     fi
+    # Verificar si hay --help en cualquier posición (ANTES de cualquier otra lógica)
+    for arg in "$@"; do
+        if [[ "$arg" == "-h" ]] || [[ "$arg" == "--help" ]]; then
+            print_usage
+            exit 0
+        fi
+    done
     # Detectar modo batch
-    if [[ "$1" == "--batch" ]] || [[ "$1" == "-b" ]]; then
-        BATCH_MODE=true
-        shift
+    for arg in "$@"; do
+        if [[ "$arg" == "--batch" ]] || [[ "$arg" == "-b" ]]; then
+            BATCH_MODE=true
+            break
+        fi
+    done
+    # Si es batch, filtrar el flag
+    if [[ "$BATCH_MODE" == true ]]; then
+        local filtered_args=()
+        for arg in "$@"; do
+            if [[ "$arg" != "--batch" ]] && [[ "$arg" != "-b" ]]; then
+                filtered_args+=("$arg")
+            fi
+        done
+        set -- "${filtered_args[@]}"
     fi
     # Validar dependencias
+    CHECK_LATEX=true
     check_dependencies || exit 1
     # Ejecutar según modo
     if [[ "$BATCH_MODE" == true ]]; then
         process_batch "$@"
     else
-        # Modo individual: el primer argumento debe ser el archivo
-        if [[ $# -lt 1 ]]; then
-            log_error "Modo individual requiere un archivo de entrada"
-            print_usage
-            exit 1
-        fi
         process_single "$@"
     fi
 }
