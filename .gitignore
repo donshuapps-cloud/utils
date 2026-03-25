@@ -5,6 +5,7 @@
 *.aux
 *.out
 *.toc
+*.pdf
 # Directorios de salida
 pdfs/
 output/
@@ -12,11 +13,27 @@ dist/
 # Archivos de sistema
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*~
 # Editor files
 .vscode/
 .idea/
-*.swp
-*.swo
+*.sublime-*
 # Archivos de prueba
 test/
 *.test.md
+prueba.md
+test.pdf
+# Archivos de backup
+*.backup
+*.bak
+*.old
+# Archivos de dependencias
+node_modules/
+*.pyc
+__pycache__/
+# Archivos de configuración local
+.env
+.local
+/config.local

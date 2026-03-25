@@ -5,7 +5,7 @@
 # Autor: Donshu
 # Contacto: donshu.apps@gmail.com
 # GitHub: https://github.com/donshuapps-cloud
-# Versión: 2.1.0 (Fixed argument parsing)
+# Versión: 2.2.0 (Verificación completa de dependencias)
 # ============================================================
 set -euo pipefail
 # ============================================================
@@ -17,10 +17,11 @@ DEFAULT_TEMPLATE=""
 DEFAULT_CSS=""
 DEFAULT_OUTPUT_DIR="."
 # Colores para output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+RED='\033[1;31m'
+GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
+BLUE='\033[1;34m'
+CYAN='\033[1;36m'
 NC='\033[0m'
 # Contadores para batch processing
 TOTAL_FILES=0
@@ -33,7 +34,7 @@ print_usage() {
     cat << EOF
 ╔══════════════════════════════════════════════════════════════╗
 ║                    md2pdf - Markdown to PDF                  ║
-║                    Versión 2.1.0 - Donshu Apps               ║
+║                    Versión 2.2.0 - Donshu Apps               ║
 ╚══════════════════════════════════════════════════════════════╝
 Uso: $(basename "$0") [OPCIONES] <archivo.md|directorio>
 Convierte archivos Markdown a PDF usando pandoc con engine XeLaTeX.
@@ -41,14 +42,28 @@ OPCIONES:
     -o, --output DIR      Directorio de salida (default: directorio actual)
     -f, --font FUENTE     Fuente principal (default: $DEFAULT_FONT)
     -e, --engine ENGINE   Engine de LaTeX (default: $DEFAULT_ENGINE)
+                          Opciones: xelatex, lualatex, pdflatex, weasyprint
     -t, --template ARCH   Plantilla de pandoc personalizada
     -c, --css ARCH        Hoja de estilos CSS
     -b, --batch           Modo lote: procesa todos los archivos .md especificados
-    --no-bom              Eliminar BOM automáticamente antes de procesar
+    --no-bom              Deshabilitar eliminación de BOM
+    --skip-svg-check      Saltar verificación de dependencias SVG
+    --check-deps          Verificar dependencias y salir
+    --debug               Mostrar errores completos de pandoc
     -v, --verbose         Modo verbose (muestra comandos ejecutados)
     -q, --quiet           Modo silencioso (solo errores)
     -h, --help            Muestra esta ayuda
+DEPENDENCIAS REQUERIDAS:
+    ✓ pandoc              Conversor principal
+    ✓ xelatex/lualatex    Engine LaTeX (según elección)
+    ⚠ rsvg-convert       Conversión de imágenes SVG (opcional)
+    Instalación de dependencias faltantes:
+        Ubuntu/Debian: sudo apt install pandoc texlive-xetex librsvg2-bin xxd
+        macOS:         brew install pandoc basictex librsvg
+        Arch Linux:    sudo pacman -S pandoc texlive-core librsvg
 MODOS DE OPERACIÓN:
+    # Verificar dependencias
+    $(basename "$0") --check-deps
     # Modo individual
     $(basename "$0") documento.md
     $(basename "$0") -o ./pdfs -f "Times New Roman" documento.md
@@ -58,18 +73,15 @@ MODOS DE OPERACIÓN:
     $(basename "$0") --batch ./documentos/ -o ./pdfs/
     # Modo batch (wildcard con shell expansion)
     $(basename "$0") --batch docs/*.md
-REQUISITOS:
-    - pandoc >= 2.0
-    - Distribución LaTeX con XeLaTeX (TeX Live, MiKTeX, MacTeX)
 EJEMPLOS:
-    # Básico
+    # Verificar entorno
+    $(basename "$0") --check-deps
+    # Conversión básica
     $(basename "$0") README.md
     # Batch con directorio
     $(basename "$0") --batch docs/ -o pdfs/ -f "Times New Roman"
-    # Batch con archivos específicos
-    $(basename "$0") --batch capitulo-1.md capitulo-2.md capitulo-3.md
-    # Procesamiento recursivo con find
-    find . -name "*.md" -exec $(basename "$0") {} \; -o ./output/
+    # Usar engine alternativo para mejor soporte SVG
+    $(basename "$0") -e lualatex documento-con-svg.md
 EOF
 }
 log_info() {
@@ -80,6 +92,11 @@ log_warn() {
 }
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+log_debug() {
+    if [[ "${DEBUG:-false}" == true ]]; then
+        echo -e "${BLUE}[DEBUG]${NC} $1" >&2
+    fi
 }
 log_batch_progress() {
     local current=$1
@@ -104,6 +121,59 @@ log_batch_progress() {
     esac
     echo -e "${status_color}[${current}/${total}] ${status_text}${NC} ${filename}"
 }
+print_dependency_report() {
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}              REPORTE DE DEPENDENCIAS - md2pdf                  ${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    # Pandoc
+    if command -v pandoc &> /dev/null; then
+        local pandoc_version=$(pandoc --version | head -n1)
+        echo -e "  ${GREEN}✓${NC} pandoc: ${pandoc_version}"
+    else
+        echo -e "  ${RED}✗${NC} pandoc: NO INSTALADO"
+        echo -e "     Instalación: sudo apt install pandoc"
+    fi
+    # Engine LaTeX
+    local engine="${ENGINE:-$DEFAULT_ENGINE}"
+    if command -v "$engine" &> /dev/null; then
+        echo -e "  ${GREEN}✓${NC} $engine: disponible"
+    else
+        echo -e "  ${RED}✗${NC} $engine: NO INSTALADO"
+        echo -e "     Instalación: sudo apt install texlive-xetex"
+    fi
+    # rsvg-convert para SVG
+    if command -v rsvg-convert &> /dev/null; then
+        local rsvg_version=$(rsvg-convert --version 2>/dev/null | head -n1)
+        echo -e "  ${GREEN}✓${NC} rsvg-convert: ${rsvg_version:-disponible}"
+    else
+        echo -e "  ${YELLOW}⚠${NC} rsvg-convert: NO INSTALADO (opcional para imágenes SVG)"
+        echo -e "     Instalación: sudo apt install librsvg2-bin"
+    fi
+    # xxd para BOM detection
+    if command -v xxd &> /dev/null; then
+        echo -e "  ${GREEN}✓${NC} xxd: disponible (detección UTF-8 BOM)"
+    else
+        echo -e "  ${YELLOW}⚠${NC} xxd: NO INSTALADO (detección BOM limitada)"
+        echo -e "     Instalación: sudo apt install xxd"
+    fi
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${GREEN}Comando para instalar todas las dependencias:${NC}"
+    echo -e "  ${BLUE}sudo apt update && sudo apt install pandoc texlive-xetex librsvg2-bin xxd${NC}"
+    echo ""
+    # Recomendaciones
+    if ! command -v rsvg-convert &> /dev/null; then
+        echo -e "${YELLOW}⚠ NOTA:${NC} Sin rsvg-convert, los documentos con imágenes SVG fallarán."
+        echo -e "  Para documentos con SVG, considera:"
+        echo -e "    1. Instalar rsvg-convert: ${BLUE}sudo apt install librsvg2-bin${NC}"
+        echo -e "    2. Usar engine lualatex: ${BLUE}md2pdf -e lualatex documento.md${NC}"
+        echo -e "    3. Omitir verificación: ${BLUE}md2pdf --skip-svg-check documento.md${NC}"
+    fi
+    echo ""
+}
 # ============================================================
 # MANEJO DE UTF-8 BOM
 # ============================================================
@@ -111,8 +181,8 @@ remove_bom() {
     local input_file="$1"
     local temp_file="$2"
     # Detectar y eliminar BOM si existe
-    if [[ "$(head -c 3 "$input_file" | xxd -p)" == "efbbbf" ]]; then
-        log_info "BOM detectado en $input_file - eliminando..."
+    if [[ "$(head -c 3 "$input_file" | xxd -p 2>/dev/null)" == "efbbbf" ]]; then
+        log_debug "BOM detectado en $input_file - eliminando..."
         tail -c +4 "$input_file" > "$temp_file"
         return 0
     else
@@ -126,36 +196,50 @@ remove_bom() {
 # ============================================================
 check_dependencies() {
     local missing=0
+    # Verificar pandoc
     if ! command -v pandoc &> /dev/null; then
         log_error "pandoc no está instalado."
-        log_error "Instalación: https://pandoc.org/installing.html"
-        log_error "En Ubuntu/Debian: sudo apt install pandoc"
-        log_error "En macOS: brew install pandoc"
+        log_error "Instalación: sudo apt install pandoc"
         missing=1
     fi
-    # Verificar engine LaTeX (solo si estamos en modo conversión, no para --help)
+    # Verificar engine LaTeX
     if [[ "${CHECK_LATEX:-true}" == true ]] && [[ -n "${ENGINE:-}" ]]; then
         case "$ENGINE" in
             xelatex|lualatex|pdflatex)
                 if ! command -v "$ENGINE" &> /dev/null; then
                     log_error "$ENGINE no está disponible."
-                    log_error "Instala una distribución LaTeX:"
-                    log_error "  Ubuntu/Debian: sudo apt install texlive-xetex"
-                    log_error "  macOS: brew install --cask mactex"
-                    log_error "  Windows: https://miktex.org/"
+                    log_error "Instalación: sudo apt install texlive-xetex"
                     missing=1
                 fi
                 ;;
         esac
     fi
+    # Verificar rsvg-convert para SVG (solo warning)
+    if [[ "${SKIP_SVG_CHECK:-false}" != true ]] && [[ "${CHECK_LATEX:-true}" == true ]]; then
+        if ! command -v rsvg-convert &> /dev/null; then
+            log_warn "rsvg-convert no está instalado (necesario para imágenes SVG)"
+            log_warn "Instalación: sudo apt install librsvg2-bin"
+            echo ""
+        fi
+    fi
     # Verificar xxd para detección de BOM
     if ! command -v xxd &> /dev/null; then
-        log_warn "xxd no está instalado. La detección de BOM estará deshabilitada."
+        if [[ "${NO_BOM:-false}" != true ]]; then
+            log_warn "xxd no está instalado. La detección de BOM estará deshabilitada."
+            log_warn "Instalación: sudo apt install xxd"
+        fi
         BOM_DETECTION=false
     else
         BOM_DETECTION=true
     fi
-    return $missing
+    # Si hay dependencias críticas faltantes, salir
+    if [[ $missing -eq 1 ]]; then
+        log_error "Faltan dependencias críticas. Abortando."
+        echo ""
+        print_dependency_report
+        exit 1
+    fi
+    return 0
 }
 # ============================================================
 # FUNCIÓN PRINCIPAL DE CONVERSIÓN
@@ -165,6 +249,7 @@ convert_md_to_pdf() {
     local output_dir="$2"
     local output_filename
     local temp_file=""
+    local use_temp=false
     # Validar archivo de entrada
     if [[ ! -f "$input_file" ]]; then
         log_error "Archivo no encontrado: $input_file"
@@ -190,10 +275,17 @@ convert_md_to_pdf() {
     # Manejo de BOM
     if [[ "$BOM_DETECTION" == true ]] && [[ "${NO_BOM:-false}" != true ]]; then
         temp_file=$(mktemp)
-        remove_bom "$input_file" "$temp_file"
-        input_file="$temp_file"
+        if remove_bom "$input_file" "$temp_file"; then
+            input_file="$temp_file"
+            use_temp=true
+            log_debug "Usando archivo temporal: $temp_file"
+        else
+            log_warn "Error procesando BOM, usando archivo original"
+            rm -f "$temp_file"
+            use_temp=false
+        fi
     fi
-    # Construir comando pandoc usando array para evitar problemas con eval
+    # Construir comando pandoc
     local pandoc_args=(
         "$input_file"
         -o "$output_filename"
@@ -219,12 +311,20 @@ convert_md_to_pdf() {
         log_info "Ejecutando: pandoc ${pandoc_args[*]}"
     fi
     # Ejecutar conversión
-    if [[ "${QUIET:-false}" != true ]]; then
-        echo ""
+    local pandoc_exit_code
+    if [[ "${DEBUG:-false}" == true ]]; then
+        pandoc "${pandoc_args[@]}"
+        pandoc_exit_code=$?
+    else
+        pandoc "${pandoc_args[@]}" 2>/dev/null
+        pandoc_exit_code=$?
     fi
-    if pandoc "${pandoc_args[@]}" 2>/dev/null; then
-        # Limpiar archivo temporal si existe
-        [[ -n "$temp_file" && -f "$temp_file" ]] && rm -f "$temp_file"
+    # Limpiar archivo temporal
+    if [[ "$use_temp" == true ]] && [[ -f "$temp_file" ]]; then
+        rm -f "$temp_file"
+        log_debug "Archivo temporal eliminado: $temp_file"
+    fi
+    if [[ $pandoc_exit_code -eq 0 ]]; then
         if [[ "${QUIET:-false}" != true ]]; then
             local file_size
             file_size=$(du -h "$output_filename" 2>/dev/null | cut -f1)
@@ -232,9 +332,10 @@ convert_md_to_pdf() {
         fi
         return 0
     else
-        # Limpiar archivo temporal en caso de error
-        [[ -n "$temp_file" && -f "$temp_file" ]] && rm -f "$temp_file"
         log_error "Conversión fallida: $input_file"
+        if [[ "${DEBUG:-false}" != true ]]; then
+            log_error "Ejecuta con --debug para ver el error completo"
+        fi
         return 1
     fi
 }
@@ -279,6 +380,14 @@ process_batch() {
                 NO_BOM=true
                 shift
                 ;;
+            --skip-svg-check)
+                SKIP_SVG_CHECK=true
+                shift
+                ;;
+            --debug)
+                DEBUG=true
+                shift
+                ;;
             *)
                 positional_args+=("$1")
                 shift
@@ -315,6 +424,7 @@ process_batch() {
             FAIL_COUNT=$((FAIL_COUNT + 1))
             log_batch_progress $current $TOTAL_FILES "$(basename "$file")" "fail"
         fi
+        echo ""
     done
     echo ""
     log_info "=== RESUMEN BATCH ==="
@@ -362,6 +472,14 @@ process_single() {
                 NO_BOM=true
                 shift
                 ;;
+            --skip-svg-check)
+                SKIP_SVG_CHECK=true
+                shift
+                ;;
+            --debug)
+                DEBUG=true
+                shift
+                ;;
             *)
                 if [[ -z "$input_file" ]]; then
                     input_file="$1"
@@ -392,18 +510,33 @@ main() {
     QUIET=false
     BATCH_MODE=false
     NO_BOM=false
+    DEBUG=false
+    SKIP_SVG_CHECK=false
+    CHECK_DEPS_ONLY=false
     # Sin argumentos: mostrar ayuda
     if [[ $# -eq 0 ]]; then
         print_usage
         exit 0
     fi
-    # Verificar si hay --help en cualquier posición (ANTES de cualquier otra lógica)
+    # Verificar si hay --help en cualquier posición
     for arg in "$@"; do
         if [[ "$arg" == "-h" ]] || [[ "$arg" == "--help" ]]; then
             print_usage
             exit 0
         fi
     done
+    # Verificar si es solo check de dependencias
+    for arg in "$@"; do
+        if [[ "$arg" == "--check-deps" ]]; then
+            CHECK_DEPS_ONLY=true
+            break
+        fi
+    done
+    # Si es solo check de dependencias, mostrar reporte y salir
+    if [[ "$CHECK_DEPS_ONLY" == true ]]; then
+        print_dependency_report
+        exit 0
+    fi
     # Detectar modo batch
     for arg in "$@"; do
         if [[ "$arg" == "--batch" ]] || [[ "$arg" == "-b" ]]; then
@@ -423,7 +556,7 @@ main() {
     fi
     # Validar dependencias
     CHECK_LATEX=true
-    check_dependencies || exit 1
+    check_dependencies
     # Ejecutar según modo
     if [[ "$BATCH_MODE" == true ]]; then
         process_batch "$@"
