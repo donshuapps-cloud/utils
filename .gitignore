@@ -1,0 +1,22 @@
+# Archivos temporales
+*.tmp
+*.temp
+*.log
+*.aux
+*.out
+*.toc
+# Directorios de salida
+pdfs/
+output/
+dist/
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+# Archivos de prueba
+test/
+*.test.md

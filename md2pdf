@@ -1,0 +1,387 @@
+#!/usr/bin/env bash
+# ============================================================
+# Script: md2pdf
+# Descripción: Wrapper para pandoc con batch processing y UTF-8 BOM handling
+# Autor: Donshu
+# Contacto: donshu.apps@gmail.com
+# GitHub: https://github.com/donshuapps-cloud
+# Versión: 2.0.0
+# ============================================================
+set -euo pipefail
+# ============================================================
+# CONFIGURACIÓN POR DEFECTO
+# ============================================================
+DEFAULT_FONT="Arial"
+DEFAULT_ENGINE="xelatex"
+DEFAULT_TEMPLATE=""
+DEFAULT_CSS=""
+DEFAULT_OUTPUT_DIR="."
+# Colores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+# Contadores para batch processing
+TOTAL_FILES=0
+SUCCESS_COUNT=0
+FAIL_COUNT=0
+# ============================================================
+# FUNCIONES DE UTILIDAD
+# ============================================================
+print_usage() {
+    cat << EOF
+╔══════════════════════════════════════════════════════════════╗
+║                    md2pdf - Markdown to PDF                  ║
+║                    Versión 2.0.0 - Donshu Apps               ║
+╚══════════════════════════════════════════════════════════════╝
+Uso: $(basename "$0") [OPCIONES] <archivo.md|directorio>
+Convierte archivos Markdown a PDF usando pandoc con engine XeLaTeX.
+OPCIONES:
+    -o, --output DIR      Directorio de salida (default: directorio actual)
+    -f, --font FUENTE     Fuente principal (default: $DEFAULT_FONT)
+    -e, --engine ENGINE   Engine de LaTeX (default: $DEFAULT_ENGINE)
+    -t, --template ARCH   Plantilla de pandoc personalizada
+    -c, --css ARCH        Hoja de estilos CSS
+    -b, --batch           Modo lote: procesa todos los archivos .md especificados
+    --no-bom              Eliminar BOM automáticamente antes de procesar
+    -v, --verbose         Modo verbose (muestra comandos ejecutados)
+    -q, --quiet           Modo silencioso (solo errores)
+    -h, --help            Muestra esta ayuda
+MODOS DE OPERACIÓN:
+    # Modo individual
+    $(basename "$0") documento.md
+    $(basename "$0") -o ./pdfs -f "Times New Roman" documento.md
+    # Modo batch (archivos específicos)
+    $(basename "$0") --batch archivo1.md archivo2.md archivo3.md
+    # Modo batch (directorio)
+    $(basename "$0") --batch ./documentos/ -o ./pdfs/
+    # Modo batch (wildcard con shell expansion)
+    $(basename "$0") --batch docs/*.md
+REQUISITOS:
+    - pandoc >= 2.0
+    - Distribución LaTeX con XeLaTeX (TeX Live, MiKTeX, MacTeX)
+EJEMPLOS:
+    # Básico
+    $(basename "$0") README.md
+    # Batch con directorio
+    $(basename "$0") --batch docs/ -o pdfs/ -f "Times New Roman"
+    # Batch con archivos específicos
+    $(basename "$0") --batch capitulo-1.md capitulo-2.md capitulo-3.md
+    # Procesamiento recursivo con find
+    find . -name "*.md" -exec $(basename "$0") {} \; -o ./output/
+EOF
+}
+log_info() {
+    [[ "${QUIET:-false}" != true ]] && echo -e "${GREEN}[INFO]${NC} $1"
+}
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
+}
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+log_batch_progress() {
+    local current=$1
+    local total=$2
+    local filename=$3
+    local status=$4
+    local status_color=""
+    local status_text=""
+    case "$status" in
+        success)
+            status_color="$GREEN"
+            status_text="✓"
+            ;;
+        fail)
+            status_color="$RED"
+            status_text="✗"
+            ;;
+        processing)
+            status_color="$BLUE"
+            status_text="▶"
+            ;;
+    esac
+    echo -e "${status_color}[${current}/${total}] ${status_text}${NC} ${filename}"
+}
+# ============================================================
+# MANEJO DE UTF-8 BOM
+# ============================================================
+remove_bom() {
+    local input_file="$1"
+    local temp_file="$2"
+    # Detectar y eliminar BOM si existe
+    if [[ "$(head -c 3 "$input_file" | xxd -p)" == "efbbbf" ]]; then
+        log_info "BOM detectado en $input_file - eliminando..."
+        tail -c +4 "$input_file" > "$temp_file"
+        return 0
+    else
+        # Sin BOM, copiar archivo original
+        cp "$input_file" "$temp_file"
+        return 0
+    fi
+}
+# ============================================================
+# VALIDACIÓN DE DEPENDENCIAS
+# ============================================================
+check_dependencies() {
+    local missing=0
+    if ! command -v pandoc &> /dev/null; then
+        log_error "pandoc no está instalado."
+        log_error "Instalación: https://pandoc.org/installing.html"
+        log_error "En Ubuntu/Debian: sudo apt install pandoc"
+        log_error "En macOS: brew install pandoc"
+        missing=1
+    fi
+    # Verificar engine LaTeX
+    if [[ -n "${ENGINE:-}" ]]; then
+        case "$ENGINE" in
+            xelatex|lualatex|pdflatex)
+                if ! command -v "$ENGINE" &> /dev/null; then
+                    log_error "$ENGINE no está disponible."
+                    log_error "Instala una distribución LaTeX:"
+                    log_error "  Ubuntu/Debian: sudo apt install texlive-xetex"
+                    log_error "  macOS: brew install --cask mactex"
+                    log_error "  Windows: https://miktex.org/"
+                    missing=1
+                fi
+                ;;
+        esac
+    fi
+    # Verificar xxd para detección de BOM
+    if ! command -v xxd &> /dev/null; then
+        log_warn "xxd no está instalado. La detección de BOM estará deshabilitada."
+        BOM_DETECTION=false
+    else
+        BOM_DETECTION=true
+    fi
+    return $missing
+}
+# ============================================================
+# FUNCIÓN PRINCIPAL DE CONVERSIÓN
+# ============================================================
+convert_md_to_pdf() {
+    local input_file="$1"
+    local output_dir="$2"
+    local output_filename
+    local temp_file=""
+    local temp_cleanup=true
+    # Validar archivo de entrada
+    if [[ ! -f "$input_file" ]]; then
+        log_error "Archivo no encontrado: $input_file"
+        return 1
+    fi
+    # Validar extensión (warning, no error)
+    if [[ ! "$input_file" =~ \.md$ && ! "$input_file" =~ \.markdown$ ]]; then
+        log_warn "Extensión inusual: $input_file (se intentará convertir)"
+    fi
+    # Crear directorio de salida si no existe
+    if [[ ! -d "$output_dir" ]]; then
+        mkdir -p "$output_dir" 2>/dev/null || {
+            log_error "No se pudo crear el directorio: $output_dir"
+            return 1
+        }
+    fi
+    # Generar nombre de salida
+    local basename_input
+    basename_input=$(basename "$input_file")
+    basename_input="${basename_input%.md}"
+    basename_input="${basename_input%.markdown}"
+    output_filename="$output_dir/${basename_input}.pdf"
+    # Manejo de BOM
+    if [[ "$BOM_DETECTION" == true ]] && [[ "${NO_BOM:-false}" != true ]]; then
+        temp_file=$(mktemp)
+        remove_bom "$input_file" "$temp_file"
+        input_file="$temp_file"
+        temp_cleanup=true
+    fi
+    # Construir comando pandoc usando array para evitar problemas con eval
+    local pandoc_args=(
+        "$input_file"
+        -o "$output_filename"
+        --pdf-engine="$ENGINE"
+        -V "mainfont=$FONT"
+        -V "geometry:margin=1in"
+        -V "geometry:paper=a4paper"
+    )
+    # Añadir plantilla si se especificó
+    if [[ -n "${TEMPLATE:-}" ]] && [[ -f "$TEMPLATE" ]]; then
+        pandoc_args+=(--template="$TEMPLATE")
+    elif [[ -n "${TEMPLATE:-}" ]]; then
+        log_warn "Plantilla no encontrada: $TEMPLATE, se omitirá"
+    fi
+    # Añadir CSS si se especificó
+    if [[ -n "${CSS:-}" ]] && [[ -f "$CSS" ]]; then
+        pandoc_args+=(--css="$CSS")
+    elif [[ -n "${CSS:-}" ]]; then
+        log_warn "CSS no encontrado: $CSS, se omitirá"
+    fi
+    # Modo verbose
+    if [[ "${VERBOSE:-false}" == true ]]; then
+        log_info "Ejecutando: pandoc ${pandoc_args[*]}"
+    fi
+    # Ejecutar conversión
+    if [[ "${QUIET:-false}" != true ]]; then
+        echo ""
+    fi
+    if pandoc "${pandoc_args[@]}" 2>/dev/null; then
+        # Limpiar archivo temporal si existe
+        [[ -n "$temp_file" && -f "$temp_file" ]] && rm -f "$temp_file"
+        if [[ "${QUIET:-false}" != true ]]; then
+            local file_size
+            file_size=$(du -h "$output_filename" 2>/dev/null | cut -f1)
+            echo -e "  ${GREEN}✓${NC} $output_filename ${YELLOW}($file_size)${NC}"
+        fi
+        return 0
+    else
+        # Limpiar archivo temporal en caso de error
+        [[ -n "$temp_file" && -f "$temp_file" ]] && rm -f "$temp_file"
+        log_error "Conversión fallida: $input_file"
+        return 1
+    fi
+}
+# ============================================================
+# PROCESAMIENTO BATCH
+# ============================================================
+process_batch() {
+    local files=()
+    local output_dir="$DEFAULT_OUTPUT_DIR"
+    # Parsear argumentos para batch mode
+    shift  # Saltar --batch
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -o|--output)
+                output_dir="$2"
+                shift 2
+                ;;
+            *)
+                # Si es un directorio, encontrar todos los .md dentro
+                if [[ -d "$1" ]]; then
+                    while IFS= read -r -d '' file; do
+                        files+=("$file")
+                    done < <(find "$1" -name "*.md" -type f -print0)
+                else
+                    files+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+    TOTAL_FILES=${#files[@]}
+    if [[ $TOTAL_FILES -eq 0 ]]; then
+        log_error "No se encontraron archivos .md para procesar"
+        return 1
+    fi
+    log_info "Procesando $TOTAL_FILES archivo(s) en modo batch..."
+    echo ""
+    local current=0
+    for file in "${files[@]}"; do
+        current=$((current + 1))
+        log_batch_progress $current $TOTAL_FILES "$(basename "$file")" "processing"
+        if convert_md_to_pdf "$file" "$output_dir"; then
+            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            log_batch_progress $current $TOTAL_FILES "$(basename "$file")" "success"
+        else
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            log_batch_progress $current $TOTAL_FILES "$(basename "$file")" "fail"
+        fi
+    done
+    echo ""
+    log_info "=== RESUMEN BATCH ==="
+    echo -e "  ${GREEN}Éxitos:${NC} $SUCCESS_COUNT"
+    echo -e "  ${RED}Fallos:${NC} $FAIL_COUNT"
+    echo -e "  Total:  $TOTAL_FILES"
+    [[ $FAIL_COUNT -eq 0 ]] && return 0 || return 1
+}
+# ============================================================
+# PROCESAMIENTO INDIVIDUAL
+# ============================================================
+process_single() {
+    local input_file="$1"
+    shift
+    # Parsear opciones restantes (pueden incluir -o, -f, etc)
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -o|--output)
+                OUTPUT_DIR="$2"
+                shift 2
+                ;;
+            -f|--font)
+                FONT="$2"
+                shift 2
+                ;;
+            -e|--engine)
+                ENGINE="$2"
+                shift 2
+                ;;
+            -t|--template)
+                TEMPLATE="$2"
+                shift 2
+                ;;
+            -c|--css)
+                CSS="$2"
+                shift 2
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -q|--quiet)
+                QUIET=true
+                shift
+                ;;
+            --no-bom)
+                NO_BOM=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    convert_md_to_pdf "$input_file" "$OUTPUT_DIR"
+    return $?
+}
+# ============================================================
+# PROCESAMIENTO PRINCIPAL
+# ============================================================
+main() {
+    # Variables por defecto
+    FONT="$DEFAULT_FONT"
+    ENGINE="$DEFAULT_ENGINE"
+    TEMPLATE="$DEFAULT_TEMPLATE"
+    CSS="$DEFAULT_CSS"
+    OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+    VERBOSE=false
+    QUIET=false
+    BATCH_MODE=false
+    NO_BOM=false
+    # Sin argumentos: mostrar ayuda
+    if [[ $# -eq 0 ]]; then
+        print_usage
+        exit 1
+    fi
+    # Detectar modo batch
+    if [[ "$1" == "--batch" ]] || [[ "$1" == "-b" ]]; then
+        BATCH_MODE=true
+        shift
+    fi
+    # Validar dependencias
+    check_dependencies || exit 1
+    # Ejecutar según modo
+    if [[ "$BATCH_MODE" == true ]]; then
+        process_batch "$@"
+    else
+        # Modo individual: el primer argumento debe ser el archivo
+        if [[ $# -lt 1 ]]; then
+            log_error "Modo individual requiere un archivo de entrada"
+            print_usage
+            exit 1
+        fi
+        process_single "$@"
+    fi
+}
+# ============================================================
+# EJECUCIÓN
+# ============================================================
+main "$@"
